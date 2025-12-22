@@ -16,136 +16,123 @@ class LaneVision(Node):
 
     def __init__(self):
         super().__init__('lane_vision_node')
-        
 
-        # QoS for camera topic
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
 
-        # Subscribe to camera
         self.sub = self.create_subscription(
-            Image,
-            '/camera/image/image_raw',
-            self.image_callback,
-            qos
-        )
-    
-        # Publishers
+            Image, '/camera/image/image_raw', self.image_callback, qos)
+
         self.center_pub = self.create_publisher(Int32, '/lane/center_line', 10)
-        self.debug_pub = self.create_publisher(Image, '/lane/debug_image', 10)
+        # self.avoid_pub  = self.create_publisher(Int32, '/lane/avoid_offset', 10)
+        self.debug_pub  = self.create_publisher(Image, '/lane/debug_image', 10)
 
         self.bridge = CvBridge()
         self.get_logger().info("Lane Vision Node Started")
 
+
     def image_callback(self, msg):
         frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
         h, w, _ = frame.shape
+        mid = w // 2
 
-        # ==============================
-        # 1. Convert to HSV
-        # ==============================
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        # White color range (Gazebo-friendly)
-        lower_white = np.array([0, 0, 120])
-        upper_white = np.array([180, 80, 255])
-
-        mask = cv2.inRange(hsv, lower_white, upper_white)
-        self.debug_pub.publish(
-            self.bridge.cv2_to_imgmsg(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), 'bgr8')
+        # =====================
+        # WHITE LANE MASK
+        # =====================
+        white_mask = cv2.inRange(
+            hsv,
+            np.array([0, 0, 120]),
+            np.array([180, 80, 255])
         )
 
-
-        # ==============================
-        # 2. ROI (bottom 40%)
-        # ==============================
         roi_y = int(h * 0.6)
-        roi = mask[roi_y:h, :]
+        roi = white_mask[roi_y:h, :]
 
-        # ==============================
-        # 3. Morphology (clean noise)
-        # ==============================
         kernel = np.ones((5, 5), np.uint8)
-        roi = cv2.morphologyEx(roi, cv2.MORPH_OPEN, kernel)
         roi = cv2.morphologyEx(roi, cv2.MORPH_CLOSE, kernel)
-        
-        #addition: Apply Gaussian blur to the ROI to reduce noise
-        roi = cv2.GaussianBlur(roi, (5, 5), 0)
 
-
-        # ==============================
-        # 4. Find contours
-        # ==============================
-        
         contours, _ = cv2.findContours(
             roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = [c for c in contours if cv2.contourArea(c) > 300]
 
-        # Filter small contours
-        contours = [c for c in contours if cv2.contourArea(c) > 300] #it was 150
-
-        self.get_logger().info(
-            f"Contours after HSV filter: {len(contours)}",
-            throttle_duration_sec=1.0
-        )
-
-        # ==============================
-        # 5. Debug image
-        # ==============================
-        debug = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-
-        # Draw ROI box
-        cv2.rectangle(
-            debug,
-            (0, roi_y),
-            (w, h),
-            (255, 0, 0),
-            2
-        )
-
-        # ==============================
-        # 6. Compute lane center (robust)
-        # ==============================
         center_msg = Int32()
         center_msg.data = -1
 
-        mid = w // 2
-
-        left_best = None   # (area, cx)
-        right_best = None  # (area, cx)
+        left = right = None
 
         for c in contours:
-            area = cv2.contourArea(c)
             M = cv2.moments(c)
             if M["m00"] == 0:
                 continue
             cx = int(M["m10"] / M["m00"])
-
             if cx < mid:
-                if (left_best is None) or (area > left_best[0]):
-                    left_best = (area, cx)
+                left = cx
             else:
-                if (right_best is None) or (area > right_best[0]):
-                    right_best = (area, cx)
+                right = cx
 
-        if left_best and right_best:
-            left_x = left_best[1]
-            right_x = right_best[1]
-            lane_center = (left_x + right_x) // 2 
+        if left and right:
+            center_msg.data = (left + right) // 2
+        obstacle_target = center_msg.data
 
-            center_msg.data = lane_center
+        
 
-            cv2.line(debug, (mid, h), (mid, roi_y), (0, 0, 255), 2)         # image mid
-            cv2.line(debug, (left_x, h), (left_x, roi_y), (255, 0, 0), 3)
-            cv2.line(debug, (right_x, h), (right_x, roi_y), (255, 0, 0), 3)
-            cv2.line(debug, (lane_center, h), (lane_center, roi_y), (0, 255, 0), 3)
+        # =====================
+        # OBSTACLE DETECTION
+        # =====================
+        avoid = Int32()
+        avoid.data = 0
 
+        # RED
+        red_mask1 = cv2.inRange(hsv, (0, 120, 70), (10, 255, 255))
+        red_mask2 = cv2.inRange(hsv, (170, 120, 70), (180, 255, 255))
+        red_mask = red_mask1 | red_mask2
 
-        # ==============================
-        # 7. Publish
-        # ==============================
+        # GREEN
+        green_mask = cv2.inRange(hsv, (40, 70, 70), (80, 255, 255))
+
+        for mask, color in [(red_mask, "red"), (green_mask, "green")]:
+            roi_obs = mask[roi_y:h, :]
+            cnts, _ = cv2.findContours(
+                roi_obs, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            for c in cnts:
+                if cv2.contourArea(c) < 30000:
+                    continue
+                
+                M = cv2.moments(c)
+                if M["m00"] == 0:
+                    print("m000 is zero")
+                    continue
+                    
+
+                cx = int(M["m10"] / M["m00"])
+                
+                if color == "red":# and cx > mid:
+                    self.get_logger().info("Red obstacle right → move left")
+                    obstacle_target = cx - mid
+                    if obstacle_target< 0:
+                        obstacle_target = 0
+                elif color == "green": #and cx < mid:
+                    self.get_logger().info("Green obstacle Left → move right")
+                    obstacle_target = cx + mid
+                    if obstacle_target> 639:
+                        obstacle_target = 639
+                    obstacle_target = 600
+                
+                       # move RIGHT
+                else:
+                    print(f"{color} obstacle ignored")
+                #obstacle_target = obstacle_target * (cv2.contourArea(c)/300) # Weight by size
+        # self.avoid_pub.publish(avoid)
+        blending_ratio = 0.2  # Tunable parameter between 0 and 1
+        center_msg.data = int(blending_ratio * center_msg.data + (1 - blending_ratio) * obstacle_target) #ratio is tunable
+        print("Final center:", center_msg.data)
         self.center_pub.publish(center_msg)
         self.debug_pub.publish(
-            self.bridge.cv2_to_imgmsg(debug, 'bgr8')
+            self.bridge.cv2_to_imgmsg(frame, 'bgr8')
         )
+
 
 def main():
     rclpy.init()

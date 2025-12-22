@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 
+#NEGLECTED FOR NOW
 import rclpy
 from rclpy.node import Node
-
 from sensor_msgs.msg import Image
-from geometry_msgs.msg import Twist
 from std_msgs.msg import Int32
 
 import cv2
 import numpy as np
 from cv_bridge import CvBridge
-import time
 
 
 class ObstacleAvoid(Node):
@@ -27,70 +25,71 @@ class ObstacleAvoid(Node):
             10
         )
 
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.offset_pub = self.create_publisher(Int32, '/lane/center_offset', 10)
+        self.offset_pub = self.create_publisher(
+            Int32, '/lane/avoid_offset', 10)
 
-        self.busy = False   # prevents repeated triggering
+        self.cooldown = 0   # frame-based cooldown
+        self.active_offset = 0
+        self.hold_frames = 0
         self.get_logger().info("Obstacle Avoidance Node Started")
 
     def image_callback(self, msg):
-        if self.busy:
+
+        # Hold current action
+        if self.hold_frames > 0:
+            self.hold_frames -= 1
+            out = Int32()
+            out.data = self.active_offset
+            self.offset_pub.publish(out)
             return
 
         frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+        h, w, _ = frame.shape
+        mid = w // 2
+
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        # -------- RED detection --------
-        lower_red1 = np.array([0, 120, 70])
-        upper_red1 = np.array([10, 255, 255])
-        lower_red2 = np.array([170, 120, 70])
-        upper_red2 = np.array([180, 255, 255])
+        roi_y = int(h * 0.82)
+        hsv_roi = hsv[roi_y:h, :]
 
-        mask_red = cv2.inRange(hsv, lower_red1, upper_red1) + \
-                   cv2.inRange(hsv, lower_red2, upper_red2)
+        # RED
+        red1 = cv2.inRange(hsv_roi, (0, 90, 80), (10, 255, 255))
+        red2 = cv2.inRange(hsv_roi, (170, 90, 80), (180, 255, 255))
+        red_mask = red1 | red2
 
-        # -------- GREEN detection --------
-        lower_green = np.array([40, 70, 70])
-        upper_green = np.array([80, 255, 255])
+        contours, _ = cv2.findContours(
+            red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        mask_green = cv2.inRange(hsv, lower_green, upper_green)
+        for c in contours:
+            if cv2.contourArea(c) < 250:
+                continue
+            print("Red obstacle detected")
+            M = cv2.moments(c)
+            if M["m00"] == 0:
+                continue
+            cx = int(M["m10"] / M["m00"])
+            obstacle_error = cx - mid
+            
+        # GREEN
+        green_mask = cv2.inRange(
+            hsv_roi, (45, 80, 80), (85, 255, 255))
 
-        if cv2.countNonZero(mask_red) > 800:
-            self.get_logger().info("RED obstacle detected → change lane RIGHT")
-            self.avoid(direction="right")
+        contours, _ = cv2.findContours(
+            green_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        elif cv2.countNonZero(mask_green) > 800:
-            self.get_logger().info("GREEN obstacle detected → change lane LEFT")
-            self.avoid(direction="left")
+        for c in contours:
+            if cv2.contourArea(c) < 250:
+                continue
+            M = cv2.moments(c)
+            if M["m00"] == 0:
+                continue
+            cx = int(M["m10"] / M["m00"])
 
-    def avoid(self, direction):
-        self.busy = True
-
-        cmd = Twist()
-
-        # -------- Rotate --------
-        cmd.angular.z = -0.5 if direction == "right" else 0.5
-        self.cmd_pub.publish(cmd)
-        time.sleep(1.0)
-
-        # -------- Move forward --------
-        cmd.angular.z = 0.0
-        cmd.linear.x = 0.15
-        self.cmd_pub.publish(cmd)
-        time.sleep(1.2)
-
-        # -------- Apply lane offset --------
-        offset = Int32()
-        offset.data = 80 if direction == "right" else -80
-        self.offset_pub.publish(offset)
-
-        # -------- Stop override --------
-        cmd.linear.x = 0.0
-        self.cmd_pub.publish(cmd)
-
-        time.sleep(0.5)
-
-        self.busy = False
+            if cx > mid:
+                self.active_offset = +80
+                self.hold_frames = 40
+                self.get_logger().info("LOCKED: GREEN obstacle → RIGHT")
+                return
 
 
 def main():

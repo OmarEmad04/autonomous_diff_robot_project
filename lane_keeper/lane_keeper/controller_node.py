@@ -16,7 +16,7 @@ class LaneController(Node):
         self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
         self.image_center = 320  # adjust if needed
-        self.kp = -0.002
+        self.kp = 0.002
         self.max_speed = 0.2
         self.missed_frames = 0  # Counter to track consecutive lost center detections
 
@@ -26,7 +26,7 @@ class LaneController(Node):
         cmd = Twist()
 
         if msg.data == -1:
-            cmd.linear.x = 0.0
+            cmd.linear.x = 1.0
             cmd.angular.z = 0.0
             self.pub.publish(cmd)
             return
@@ -42,12 +42,15 @@ class LaneController(Node):
         speed = max(self.max_speed - (distance_from_center * 0.001), 0.03)  # Adjust speed with error
 
         cmd.linear.x = speed
-        cmd.angular.z = self.kp * error  # Proportional control
+        cmd.angular.z = -self.kp * error  # Proportional control
 
         # Clamp angular speed to avoid overshooting
         cmd.angular.z = max(min(cmd.angular.z, 0.6), -0.6)
 
         self.pub.publish(cmd)
+        
+    def offset_callback(self, msg):
+        self.avoid_offset = msg.data
 
 
 
