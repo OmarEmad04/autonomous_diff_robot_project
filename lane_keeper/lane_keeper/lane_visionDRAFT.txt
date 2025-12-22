@@ -1,0 +1,590 @@
+#!/usr/bin/env python3
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
+
+from sensor_msgs.msg import Image
+from std_msgs.msg import Int32
+
+import cv2
+import numpy as np
+from cv_bridge import CvBridge
+
+
+class LaneVision(Node):
+
+    def __init__(self):
+        super().__init__('lane_vision_node')
+
+        # QoS for camera topic
+        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+
+        # Subscribe to camera
+        self.sub = self.create_subscription(
+            Image,
+            '/camera/image/image_raw',
+            self.image_callback,
+            qos
+        )
+
+        # Publishers
+        self.center_pub = self.create_publisher(Int32, '/lane/center_line', 10)
+        self.debug_pub = self.create_publisher(Image, '/lane/debug_image', 10)
+
+        self.bridge = CvBridge()
+        self.get_logger().info("Lane Vision Node Started")
+
+    def image_callback(self, msg):
+        frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+        h, w, _ = frame.shape
+
+        # ==============================
+        # 1. Convert to HSV
+        # ==============================
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        # White color range (Gazebo-friendly)
+        lower_white = np.array([0, 0, 120])
+        upper_white = np.array([180, 80, 255])
+
+        mask = cv2.inRange(hsv, lower_white, upper_white)
+        self.debug_pub.publish(
+            self.bridge.cv2_to_imgmsg(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), 'bgr8')
+        )
+
+
+        # ==============================
+        # 2. ROI (bottom 40%)
+        # ==============================
+        roi_y = int(h * 0.6)
+        roi = mask[roi_y:h, :]
+
+        # ==============================
+        # 3. Morphology (clean noise)
+        # ==============================
+        kernel = np.ones((5, 5), np.uint8)
+        roi = cv2.morphologyEx(roi, cv2.MORPH_OPEN, kernel)
+        roi = cv2.morphologyEx(roi, cv2.MORPH_CLOSE, kernel)
+
+        # ==============================
+        # 4. Find contours
+        # ==============================
+        contours, _ = cv2.findContours(
+            roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Filter small contours
+        contours = [c for c in contours if cv2.contourArea(c) > 150]
+
+        self.get_logger().info(
+            f"Contours after HSV filter: {len(contours)}",
+            throttle_duration_sec=1.0
+        )
+
+        # ==============================
+        # 5. Debug image
+        # ==============================
+        debug = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+
+        # Draw ROI box
+        cv2.rectangle(
+            debug,
+            (0, roi_y),
+            (w, h),
+            (255, 0, 0),
+            2
+        )
+
+        # Draw contours
+        for c in contours:
+            c_shifted = c.copy()
+            c_shifted[:, :, 1] += roi_y
+            cv2.drawContours(debug, [c_shifted], -1, (0, 255, 255), 2)
+
+        # ==============================
+        # 6. Compute lane center
+        # ==============================
+        center_msg = Int32()
+        center_msg.data = -1
+
+        xs = []
+        for c in contours:
+            M = cv2.moments(c)
+            if M["m00"] > 0:
+                cx = int(M["m10"] / M["m00"])
+                xs.append(cx)
+
+        if len(xs) >= 2:
+            left_x = min(xs)
+            right_x = max(xs)
+            lane_center = (left_x + right_x) // 2
+            center_msg.data = lane_center
+
+            # Draw lines
+            cv2.line(debug, (left_x, h), (left_x, roi_y), (255, 0, 0), 3)
+            cv2.line(debug, (right_x, h), (right_x, roi_y), (255, 0, 0), 3)
+            cv2.line(debug, (lane_center, h), (lane_center, roi_y), (0, 255, 0), 3)
+
+            self.get_logger().info(
+                f"Left: {left_x}, Right: {right_x}, Center: {lane_center}",
+                throttle_duration_sec=1.0
+            )
+
+        # ==============================
+        # 7. Publish
+        # ==============================
+        self.center_pub.publish(center_msg)
+        self.debug_pub.publish(
+            self.bridge.cv2_to_imgmsg(debug, 'bgr8')
+        )
+
+
+    def centroid_x(self, contour):
+        M = cv2.moments(contour)
+        if M['m00'] == 0:
+            return None
+        return int(M['m10'] / M['m00'])
+
+
+def main():
+    rclpy.init()
+    node = LaneVision()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+
+
+
+
+casters
+<!-- CASTER 1 -->
+    <visual>
+      <origin xyz="-0.15 0 -0.05" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.05"/>
+      </geometry>
+      <material name="orange"/>
+    </visual>
+    <collision>
+      <origin xyz="-0.15 0 -0.05" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.05"/>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>0.0</mu>
+            <mu2>0.0</mu2>
+            <slip1>1.0</slip1>
+            <slip2>1.0</slip2>
+          </ode>
+        </friction>
+      <contact>
+        <ode>
+          <soft_cfm>0.0</soft_cfm>  <!-- Optional: reduces bouncing -->
+          <soft_erp>0.2</soft_erp>
+          <kp>1000000.0</kp>      <!-- High stiffness -->
+          <kd>1.0</kd>            <!-- Low damping -->
+          <max_vel>100.0</max_vel>
+          <min_depth>0.001</min_depth>  <!-- Helps consistent contacts -->
+        </ode>
+      </contact>
+      </surface>
+    </collision>
+
+    <!-- CASTER 2 -->
+    <visual>
+      <origin xyz="0.15 0 -0.05" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.05"/>
+      </geometry>
+      <material name="orange"/>
+    </visual>
+    <collision>
+      <origin xyz="0.15 0 -0.05" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.05"/>
+      </geometry>
+      <surface>
+        <friction>
+          <ode>
+            <mu>0.0</mu>
+            <mu2>0.0</mu2>
+            <slip1>1.0</slip1>
+            <slip2>1.0</slip2>
+          </ode>
+        </friction>
+        <contact>
+        <ode>
+          <soft_cfm>0.0</soft_cfm>  <!-- Optional: reduces bouncing -->
+          <soft_erp>0.2</soft_erp>
+          <kp>1000000.0</kp>      <!-- High stiffness -->
+          <kd>1.0</kd>            <!-- Low damping -->
+          <max_vel>100.0</max_vel>
+          <min_depth>0.001</min_depth>  <!-- Helps consistent contacts -->
+        </ode>
+      </contact>
+      </surface>
+    </collision>
+
+
+
+    chassis
+     <!-- CHASSIS -->
+  <link name="chassis">
+    <inertial>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <mass value="5.0"/>
+      <inertia
+        ixx="0.2"
+        iyy="0.2"
+        izz="0.2"
+        ixy="0" ixz="0" iyz="0"/>
+
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.2" length="0.05"/>
+      </geometry>
+      <material name="blue"/>
+    </visual>
+
+    <collision>
+      <geometry>
+        <cylinder radius="0.2" length="0.05"/>
+      </geometry>
+    </collision>
+  </link>
+
+
+
+
+
+
+
+
+
+
+<gazebo reference="lidar_link">
+  <sensor name="lidar" type="ray">
+    <always_on>true</always_on>
+    <update_rate>10</update_rate>
+
+    <ray>
+      <scan>
+        <horizontal>
+          <samples>360</samples>
+          <resolution>1</resolution>
+          <min_angle>-3.14159</min_angle>
+          <max_angle>3.14159</max_angle>
+        </horizontal>
+      </scan>
+      <range>
+        <min>0.05</min>
+        <max>10.0</max>
+        <resolution>0.01</resolution>
+      </range>
+    </ray>
+
+    <!-- THIS plugin name and filename MUST match -->
+    <plugin name="gazebo_ros_ray_sensor" filename="libgazebo_ros_ray_sensor.so">
+      <ros>
+        <namespace>/</namespace>
+        <remapping>out:=scan</remapping>
+      </ros>
+      <output_type>sensor_msgs/LaserScan</output_type>
+      <frame_name>lidar_link</frame_name>
+    </plugin>
+  </sensor>
+</gazebo>
+
+=====================================================================================================
+========================================robot urdf===================================================
+
+================================================
+<?xml version="1.0"?>
+<robot name="differential_drive_robot">
+
+  <!-- MATERIALS -->
+  <material name="black">
+    <color rgba="0.0 0.0 0.0 1.0"/>
+  </material>
+
+  <material name="blue">
+    <color rgba="0.0 0.0 0.8 1.0"/>
+  </material>
+
+  <material name="orange">
+    <color rgba="1.0 0.4235 0.0392 1.0"/>
+  </material>
+
+  <!-- CHASSIS -->
+  <link name="chassis">
+    <inertial>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <mass value="4.8"/>
+      <inertia
+        ixx="0.2"
+        iyy="0.2"
+        izz="0.2"
+        ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.1" length="0.05"/>
+      </geometry>
+      <material name="blue"/>
+    </visual>
+
+    <collision>
+      <geometry>
+        <cylinder radius="0.1" length="0.05"/>
+      </geometry>
+    </collision>
+    <!-- CASTER 1 -->
+    <visual>
+      <origin xyz="-0.09 0 -0.035" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.01"/>
+      </geometry>
+      <material name="orange"/>
+    </visual>
+    <collision>
+      <origin xyz="-0.09 0 -0.035" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.01"/>
+      </geometry>
+    </collision>
+
+    <!-- CASTER 2 -->
+    <visual>
+      <origin xyz="0.09 0 -0.035" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.01"/>
+      </geometry>
+      <material name="orange"/>
+    </visual>
+    <collision>
+      <origin xyz="0.09 0 -0.035" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- LEFT WHEEL -->
+  <link name="left_wheel">
+    <inertial>
+      <origin xyz="0 -0.02 0" rpy="0 1.5707 1.5707"/>
+      <mass value="0.4"/>
+      <inertia
+        ixx="0.01"
+        iyy="0.01"
+        izz="0.01"
+        ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 -0.02 0" rpy="0 1.5707 1.5707"/>
+      <geometry>
+        <cylinder radius="0.045" length="0.04"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+    <collision>
+      <origin xyz="0 -0.02 0" rpy="0 1.5707 1.5707"/>
+      <geometry>
+        <cylinder radius="0.045" length="0.04"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- RIGHT WHEEL -->
+  <link name="right_wheel">
+    <inertial>
+      <origin xyz="0 0.02 0" rpy="0 1.5707 1.5707"/>
+      <mass value="0.4"/>
+      <inertia
+        ixx="0.01"
+        iyy="0.01"
+        izz="0.01"
+        ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0.02 0" rpy="0 1.5707 1.5707"/>
+      <geometry>
+        <cylinder radius="0.045" length="0.04"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0.02 0" rpy="0 1.5707 1.5707"/>
+      <geometry>
+        <cylinder radius="0.045" length="0.04"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- JOINTS -->
+  <joint name="left_wheel_hinge" type="continuous">
+    <parent link="chassis"/>
+    <child link="left_wheel"/>
+    <origin xyz="0 -0.1 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="100" velocity="10"/>
+  </joint>
+
+  <joint name="right_wheel_hinge" type="continuous">
+    <parent link="chassis"/>
+    <child link="right_wheel"/>
+    <origin xyz="0 0.1 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="100" velocity="10"/>
+  </joint>
+
+  <!-- CAMERA -->
+  <link name="camera_link">
+    <visual>
+      <origin xyz="0.02 0 -0.03" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.025 0.025 0.025"/>
+      </geometry>
+      <material name="blue"/>
+    </visual>
+    <inertial>
+      <origin xyz="0 0 0"/>
+      <mass value="0.05"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <joint name="camera_joint" type="fixed">
+    <parent link="chassis"/>
+    <child link="camera_link"/>
+    <origin xyz="0.1 0 0.15" rpy="0 0 0"/>
+  </joint>
+
+  <!-- LIDAR LINK -->
+  <link name="lidar_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.016" length="0.05"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+  </link>
+
+  <joint name="lidar_joint" type="fixed">
+    <parent link="chassis"/>
+    <child link="lidar_link"/>
+    <origin xyz="0.125 0 0.20" rpy="0 0 0"/>
+  </joint>
+
+  <gazebo reference="lidar_link">
+    <sensor type="ray" name="lidar">
+      <pose>0 0 0 0 0 0</pose>
+      <update_rate>10</update_rate>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <min_angle>-3.1416</min_angle>
+            <max_angle>3.1416</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.05</min>
+          <max>10.0</max>
+        </range>
+      </ray>
+      <plugin name="gazebo_ros_laser" filename="libgazebo_ros_ray_sensor.so">
+        <ros>
+          <namespace>/</namespace>
+          <remapping>scan:=scan</remapping>
+        </ros>
+        <frame_name>lidar_link</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <!-- GAZEBO PLUGINS -->
+  <gazebo>
+    <plugin name="diff_drive" filename="libgazebo_ros_diff_drive.so">
+      <ros>
+        <namespace>/</namespace>
+      </ros>
+
+      <update_rate>50.0</update_rate>
+
+      <left_joint>left_wheel_hinge</left_joint>
+      <right_joint>right_wheel_hinge</right_joint>
+
+      <wheel_separation>0.2</wheel_separation>
+      <wheel_diameter>0.1</wheel_diameter>  <!-- Fixed: 2 * radius -->
+
+      <max_wheel_torque>20</max_wheel_torque>
+      <max_wheel_acceleration>1.5</max_wheel_acceleration>  <!-- Optional, but helps it was 5 -->
+
+      <command_topic>cmd_vel</command_topic>
+      <odometry_topic>odom</odometry_topic>
+
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>chassis</robot_base_frame>
+
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+    </plugin>
+  </gazebo>
+
+  <gazebo reference="camera_link">
+    <sensor type="camera" name="front_camera">
+      <always_on>true</always_on>
+      <update_rate>30</update_rate>
+      <camera>
+        <horizontal_fov>1.0</horizontal_fov>
+        <image>
+          <width>640</width>
+          <height>480</height>
+          <format>R8G8B8</format>
+        </image>
+        <clip>
+          <near>0.05</near>
+          <far>30.0</far>
+        </clip>
+      </camera>
+      <plugin name="camera_controller" filename="libgazebo_ros_camera.so">
+        <ros>
+          <namespace>/camera</namespace>
+        </ros>
+        <camera_name>image</camera_name>
+        <frame_name>camera_link</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <gazebo reference="left_wheel">
+    <mu1>5.0</mu1>      <!-- High along rolling direction -->
+    <mu2>2.0</mu2>       <!-- Low sideways -->
+  </gazebo>
+
+  <gazebo reference="right_wheel">
+    <mu1>5.0</mu1>      <!-- High along rolling direction -->
+    <mu2>2.0</mu2>       <!-- Low sideways -->
+  </gazebo>
+
+  <gazebo reference="chassis">
+    <dynamics>
+      <angular_damping>10.0</angular_damping>
+      <linear_damping>0.5</linear_damping>
+    </dynamics>
+  </gazebo>
+
+</robot>
