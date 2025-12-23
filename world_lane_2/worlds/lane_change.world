@@ -25,7 +25,7 @@
           </geometry>
           <material><diffuse>1 1 1 1</diffuse></material>
         </visual>
-        <pose>5 0.7 0 0 0 0</pose>
+        <pose>5 0.35 0 0 0 0</pose>
       </link>
     </model>
 
@@ -41,7 +41,7 @@
           </geometry>
           <material><diffuse>1 1 1 1</diffuse></material>
         </visual>
-        <pose>5 -0.7 0 0 0 0</pose>
+        <pose>5 -0.35 0 0 0 0</pose>
       </link>
     </model>
 
@@ -53,12 +53,12 @@
           <geometry><box><size>10 0.15 0.02</size></box></geometry>
           <material><diffuse>1 1 1 1</diffuse></material>
         </visual>
-        <pose>5 2.2 0 0 0 0</pose>
+        <pose>5 1.05 0 0 0 0</pose>
       </link>
     </model>
 
     <!-- Lane 2 right -->
-    <model name="lane2_right">
+    <!-- <model name="lane2_right">
       <static>true</static>
       <link name="link">
         <visual name="visual">
@@ -67,7 +67,7 @@
         </visual>
         <pose>5 0.95 0 0 0 0</pose>
       </link>
-    </model>
+    </model> -->
 
     <!-- Obstacle 1 (Lane 1 at x = 4m) -->
     <model name="obstacle1">
@@ -103,7 +103,7 @@
           <emissive>0 1 0 1</emissive>
           </material>
         </visual>
-        <pose>8 1.55 0.15 0 0 0</pose>
+        <pose>8 0.7 0.15 0 0 0</pose>
       </link>
     </model>
 

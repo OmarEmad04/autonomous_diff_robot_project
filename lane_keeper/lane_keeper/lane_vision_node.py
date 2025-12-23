@@ -25,6 +25,7 @@ class LaneVision(Node):
         self.center_pub = self.create_publisher(Int32, '/lane/center_line', 10)
         # self.avoid_pub  = self.create_publisher(Int32, '/lane/avoid_offset', 10)
         self.debug_pub  = self.create_publisher(Image, '/lane/debug_image', 10)
+        self.finish_pub  = self.create_publisher(Int32, '/finish_line', 10)
 
         self.bridge = CvBridge()
         self.get_logger().info("Lane Vision Node Started")
@@ -82,7 +83,7 @@ class LaneVision(Node):
         # =====================
         avoid = Int32()
         avoid.data = 0
-
+        
         # RED
         red_mask1 = cv2.inRange(hsv, (0, 120, 70), (10, 255, 255))
         red_mask2 = cv2.inRange(hsv, (170, 120, 70), (180, 255, 255))
@@ -119,8 +120,7 @@ class LaneVision(Node):
                     if obstacle_target> 639:
                         obstacle_target = 639
                     obstacle_target = 600
-                
-                       # move RIGHT
+                    # move RIGHT
                 else:
                     print(f"{color} obstacle ignored")
                 #obstacle_target = obstacle_target * (cv2.contourArea(c)/300) # Weight by size
